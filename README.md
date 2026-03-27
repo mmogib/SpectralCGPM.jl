@@ -1,6 +1,6 @@
 # Reproducing the Numerical Experiments
 
-This directory contains the Julia code for the paper:
+This repository contains the Julia code for the paper:
 
 > **Spectral conjugate gradient projection methods for large-scale monotone equations without Lipschitz continuity**
 > Kabenge Hamiss, Mohammed Alshahrani, Mujahid N. Syed
@@ -19,21 +19,34 @@ Follow the steps below in order. Each step tells you what command to run and wha
    ```
    You should see something like `julia version 1.11.x`. Any version from 1.10 onward will work.
 
-## Step 1: Install dependencies
+## Step 1: Download and install dependencies
 
-Open a terminal and navigate to the `jcode/` folder:
+**Option A — Clone with Git** (recommended if you have Git installed):
 
 ```bash
-cd jcode
+git clone https://github.com/mmogib/SpectralCGPM.jl.git
+cd SpectralCGPM.jl
 ```
 
-Then install all required packages:
+**Option B — Direct download** (no Git required):
+
+1. Go to <https://github.com/mmogib/SpectralCGPM.jl>
+2. Click the green **Code** button, then **Download ZIP**
+3. Extract the ZIP file
+4. Open a terminal and navigate into the extracted folder:
+   ```bash
+   cd SpectralCGPM.jl-master
+   ```
+
+Then install all required Julia packages:
 
 ```bash
 julia --project=. -e "using Pkg; Pkg.instantiate()"
 ```
 
 This reads `Project.toml` and downloads everything Julia needs (CSV, DataFrames, Plots, etc.). It may take a few minutes the first time. You only need to do this once.
+
+**All commands below assume your terminal is inside this folder.**
 
 ## Step 2: Smoke test (verify the setup)
 
@@ -87,19 +100,14 @@ Supports `--resume` if interrupted.
 
 ## Step 5: Prepare the LIBSVM datasets
 
-The logistic regression experiment uses 12 machine-learning datasets from the LIBSVM repository. The raw dataset files (`.t` format) are already included in `data/libsvm/`. Convert them to CSV:
+The logistic regression experiment uses 12 machine-learning datasets from the LIBSVM repository. The pre-converted CSV files are included in `data/libsvm/`. If you need to regenerate them from the raw `.t` files, run:
 
 ```bash
 julia --project=. scripts/s20_libsvm_to_csv.jl
-```
-
-Then verify the conversion:
-
-```bash
 julia --project=. scripts/s21_verify_libsvm_csv.jl
 ```
 
-Both steps are fast (under a minute). You only need to do this once.
+Both steps are fast (under a minute). The CSV files are already provided, so **you can skip this step** unless you want to verify the conversion yourself.
 
 ## Step 6: Logistic regression experiment (300 runs)
 
@@ -162,11 +170,11 @@ julia --project=. scripts/s70_figures.jl --signal         # CS figures only
 ## Directory structure
 
 ```
-jcode/
+SpectralCGPM.jl/
 ├── Project.toml              # Dependencies
 ├── README.md                 # This file
 ├── data/
-│   └── libsvm/               # 12 LIBSVM datasets (.t raw + .csv converted)
+│   └── libsvm/               # 12 LIBSVM datasets (.csv)
 ├── src/
 │   ├── includes.jl           # Entry point (loads everything below)
 │   ├── deps.jl               # Shared imports
@@ -186,7 +194,7 @@ jcode/
 │   ├── s55_logreg.jl         # Step 6: logistic regression
 │   ├── s70_figures.jl        # Step 8: generate figures
 │   └── s75_tables.jl         # Step 7: generate tables
-└── results/
+└── results/                  # Created automatically by the scripts
     ├── benchmark/            # raw.csv + backups
     ├── signal_restore/       # cs_sweep.csv
     ├── logreg/               # logreg_results.csv
@@ -209,7 +217,7 @@ Competitor methods use their originally published parameters. Our methods use th
 
 ## Troubleshooting
 
-- **"Package X not found"**: Re-run `julia --project=. -e "using Pkg; Pkg.instantiate()"` from the `jcode/` folder.
+- **"Package X not found"**: Re-run `julia --project=. -e "using Pkg; Pkg.instantiate()"` from inside the project folder.
 - **Run interrupted**: Use `--resume` to continue from where it stopped (supported by Steps 3, 4, and 6).
 - **Plots fail to save**: Make sure the `results/figures/` directory exists. Create it manually if needed.
 - **Out of memory on large dimensions**: Close other programs. The largest runs (n = 120,000) need several GB of RAM.
