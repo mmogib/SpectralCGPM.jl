@@ -8,7 +8,7 @@
 
 mutable struct ProgressCallback
     prog::Any          # Progress bar (or nothing)
-    label::String      # e.g. "GMOPCGM P4 n=10000"
+    label::String      # e.g. "SOPP P4 n=10000"
     maxiter::Int
     n_done::Ref{Int}   # total runs done (shared across all solves)
     n_total::Int       # total runs planned
@@ -35,18 +35,122 @@ function _pcb_done!(cb::ProgressCallback, converged::Bool)
     converged ? (cb.n_conv[] += 1) : (cb.n_fail[] += 1)
 end
 
-# NaN guard: terminate early if residual or direction blows up
-_isnan_bail(normG, p) = isnan(normG) || isinf(normG) || any(isnan, p)
+# Non-finite guard: terminate early if residual or direction blows up
+_isnan_bail(normG, p) = !isfinite(normG) || any(v -> !isfinite(v), p)
 
-# ── Shared line search for GMOPCGM and GCGPM ─────────────────────────────────
+_elapsed_seconds(t0_ns::UInt64, t1_ns::UInt64=time_ns()) =
+    Float64(t1_ns - t0_ns) / 1e9
 
-function _backtrack_ours(G_func, x, p, rho, beta, zeta, zeta1, zeta2, fe)
+function _finish(cb::ProgressCallback, converged::Bool, status::Symbol,
+                 iterations::Int, fe::Int, residual::Real, t0_ns::UInt64,
+                 x::Vector{Float64}; restarts::Int=0)
+    elapsed = _elapsed_seconds(t0_ns)
+    _pcb_done!(cb, converged)
+    SolverResult(converged, iterations, fe, residual, elapsed, x;
+                 status=status, restarts=restarts)
+end
+
+function _is_feasible(prob::TestProblem, x::Vector{Float64})
+    px = prob.proj(x)
+    scale = max(1.0, norm(x), norm(px))
+    norm(px .- x) <= sqrt(eps(Float64)) * scale
+end
+
+_update_gamma(::SOPPMethod, gamma::Real, improved::Bool) =
+    clamp(improved ? 1.1 * gamma : gamma, 1.0, 1.8)
+
+_update_gamma(::SDLPMethod, gamma::Real, improved::Bool) =
+    clamp((improved ? 1.1 : 1.05) * gamma, 1.0, 1.95)
+
+function _restart_direction(Gnext, lambda_current, alpha_min, alpha_max)
+    if isfinite(lambda_current) && alpha_min <= lambda_current <= alpha_max
+        return -lambda_current .* Gnext, Float64(lambda_current)
+    end
+    return -Gnext, 1.0
+end
+
+function _sopp_next_direction(m::SOPPMethod, Gx, Gz, Gnext, s, p,
+                              lambda_current)
+    q = Gz .- Gx .+ m.tau .* s
+    s2 = dot(s, s)
+    sq = dot(s, q)
+    q2 = dot(q, q)
+    pq = dot(p, q)
+    if !all(isfinite, q) || !all(isfinite, (s2, sq, q2, pq)) ||
+       !(s2 > 0 && sq > 0 && q2 > 0 && pq > 0)
+        direction, lambda = _restart_direction(
+            Gnext, lambda_current, m.alpha_min, m.alpha_max)
+        return (direction=direction, lambda=lambda, restarted=true)
+    end
+
+    lambda = spectral_proj(max(s2 / sq, sq / q2), m.alpha_min, m.alpha_max)
+    tstar = lambda / 2 * (sq / s2 + q2 / sq)
+    theta = dot(q .- tstar .* s, Gnext) / pq
+    G2 = dot(Gnext, Gnext)
+    if !all(isfinite, (lambda, tstar, theta, G2)) || !(G2 > 0)
+        direction, fallback = _restart_direction(
+            Gnext, lambda, m.alpha_min, m.alpha_max)
+        return (direction=direction, lambda=fallback, restarted=true)
+    end
+
+    pperp = p .- (dot(Gnext, p) / G2) .* Gnext
+    pperp_norm = norm(pperp)
+    bar_theta = if pperp_norm == 0.0
+        0.0
+    else
+        clip_limit = sqrt(m.c^2 - lambda^2) * sqrt(G2) / pperp_norm
+        sign(theta) * min(abs(theta), clip_limit)
+    end
+    direction = -lambda .* Gnext .+ bar_theta .* pperp
+    if !isfinite(bar_theta) || !all(isfinite, pperp) || !all(isfinite, direction)
+        direction, fallback = _restart_direction(
+            Gnext, lambda, m.alpha_min, m.alpha_max)
+        return (direction=direction, lambda=fallback, restarted=true)
+    end
+    return (direction=direction, lambda=Float64(lambda), restarted=false)
+end
+
+function _sdlp_next_direction(m::SDLPMethod, Gx, Gnext, p, lambda_current)
+    y = Gnext .- Gx
+    p2 = dot(p, p)
+    if !all(isfinite, y) || !isfinite(p2) || !(p2 > 0)
+        direction, lambda = _restart_direction(
+            Gnext, lambda_current, m.alpha_min, m.alpha_max)
+        return (direction=direction, lambda=lambda, restarted=true)
+    end
+
+    r = 1.0 + max(0.0, -dot(y, p) / p2)
+    w = y .+ r .* p
+    pw = dot(p, w)
+    w2 = dot(w, w)
+    if !isfinite(r) || !all(isfinite, w) || !all(isfinite, (pw, w2)) ||
+       !(pw > 0 && w2 > 0)
+        direction, lambda = _restart_direction(
+            Gnext, lambda_current, m.alpha_min, m.alpha_max)
+        return (direction=direction, lambda=lambda, restarted=true)
+    end
+
+    lambda = spectral_proj(max(w2 / pw, pw / p2), m.alpha_min, m.alpha_max)
+    Gp = dot(Gnext, p)
+    a = Gp / pw
+    theta = dot(Gnext, w) / pw - lambda * (w2 / pw) * (Gp / pw)
+    direction = -lambda .* Gnext .+ theta .* p .+ m.tau .* a .* w
+    if !all(isfinite, (lambda, a, theta)) || !all(isfinite, direction)
+        direction, fallback = _restart_direction(
+            Gnext, lambda, m.alpha_min, m.alpha_max)
+        return (direction=direction, lambda=fallback, restarted=true)
+    end
+    return (direction=direction, lambda=Float64(lambda), restarted=false)
+end
+
+# ── Shared line search for SOPP and SDLP ─────────────────────────────────────
+
+function _backtrack_ours(G_func, x, p, rho, beta, zeta, zeta1, zeta2, _fe)
     pp = dot(p, p)
     for j in 0:50
         alpha = beta * rho^j
         z = x .+ alpha .* p
         Gz = G_func(z)
-        fe[] += 1
         normGz = norm(Gz)
         proj_val = clamp_scalar(normGz, zeta1, zeta2)
         if dot(Gz, p) <= -zeta * alpha * pp * proj_val
@@ -54,123 +158,143 @@ function _backtrack_ours(G_func, x, p, rho, beta, zeta, zeta1, zeta2, fe)
         end
         alpha <= 1e-15 && break
     end
-    return nothing, x, G_func(x)  # line search failed
+    return nothing, x, nothing  # caller already holds G(x)
 end
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# GMOPCGM
+# SOPP
 # ═══════════════════════════════════════════════════════════════════════════════
 
-function solve(m::GMOPCGMMethod, prob::TestProblem, x0::Vector{Float64};
+function solve(m::SOPPMethod, prob::TestProblem, x0::Vector{Float64};
                eps=1e-11, maxiter=2000, cb::ProgressCallback=ProgressCallback(),
-               stall_limit::Int=10)
-    t0 = time()
+               stall_limit::Int=typemax(Int),
+               on_iter::Union{Nothing,Function}=nothing)
+    t0_ns = time_ns()
     fe = Ref(0)
     G(x) = (fe[] += 1; prob.G(x))
 
-    x = copy(x0); Gx = G(x); normGx = norm(Gx)
-    normGx < eps && (_pcb_done!(cb, true); return SolverResult(true, 0, fe[], normGx, time()-t0, x))
+    x = prob.proj(copy(x0)); Gx = G(x); normGx = norm(Gx)
+    on_iter === nothing || on_iter(0, normGx)
+    normGx <= eps && return _finish(
+        cb, true, :converged_initial, 0, fe[], normGx, t0_ns, x)
 
-    p = -Gx; phi = m.lambda0; gamma_val = m.gamma; stall = 0
+    p = -Gx; phi = m.lambda0; gamma_val = m.gamma; stall = 0; restarts = 0
 
     for k in 1:maxiter
         _pcb(cb, k, normGx)
-        _isnan_bail(normGx, p) && (_pcb_done!(cb, false); return SolverResult(false, k, fe[], NaN, time()-t0, x))
-        stall > stall_limit && (_pcb_done!(cb, false); return SolverResult(false, k, fe[], normGx, time()-t0, x))
+        _isnan_bail(normGx, p) && return _finish(
+            cb, false, :nonfinite, k, fe[], NaN, t0_ns, x; restarts=restarts)
+        stall > stall_limit && return _finish(
+            cb, false, :stalled, k, fe[], normGx, t0_ns, x; restarts=restarts)
 
         alpha, z, Gz = _backtrack_ours(G, x, p, m.rho, m.beta, m.zeta, m.zeta1, m.zeta2, fe)
-        alpha === nothing && (_pcb_done!(cb, false); return SolverResult(false, k, fe[], normGx, time()-t0, x))
+        alpha === nothing && return _finish(
+            cb, false, :line_search_failed, k, fe[], normGx, t0_ns, x; restarts=restarts)
         normGz = norm(Gz)
-        if normGz < eps; _pcb_done!(cb, true); return SolverResult(true, k, fe[], normGz, time()-t0, z); end
+        if normGz <= eps && _is_feasible(prob, z)
+            on_iter === nothing || on_iter(k, normGz)
+            return _finish(cb, true, :converged_trial, k, fe[], normGz, t0_ns, z;
+                           restarts=restarts)
+        end
+        (!isfinite(normGz) || normGz == 0.0) && return _finish(
+            cb, false, :invalid_trial_residual, k, fe[], normGz, t0_ns, x;
+            restarts=restarts)
 
         mu_k = dot(Gz, x .- z) / normGz^2
         x_new = prob.proj(x .- gamma_val .* mu_k .* Gz)
         Gx_new = G(x_new); normGx_new = norm(Gx_new)
+        on_iter === nothing || on_iter(k, normGx_new)
+        if normGx_new <= eps
+            return _finish(cb, true, :converged_projected, k, fe[], normGx_new,
+                           t0_ns, x_new; restarts=restarts)
+        end
+        !isfinite(normGx_new) && return _finish(
+            cb, false, :nonfinite, k, fe[], normGx_new, t0_ns, x_new;
+            restarts=restarts)
 
         if normGx_new < normGx
-            gamma_val = min(gamma_val * 1.1, 1.8); stall = 0
+            gamma_val = _update_gamma(m, gamma_val, true); stall = 0
         else
-            gamma_val = max(gamma_val * 1.0, 1.0); stall += 1
+            gamma_val = _update_gamma(m, gamma_val, false); stall += 1
         end
 
-        s = z .- x; y = Gx_new .- Gx; v = y .+ m.tau .* s
-        norms2 = dot(s, s); sv = dot(s, v); normv2 = dot(v, v)
-
-        if !(normGx_new < 0.75 * normGx) && norms2 > 1e-30 && abs(sv) > 1e-30
-            phi = spectral_proj(max(norms2/sv, sv/normv2), m.alpha_min, m.alpha_max)
-        end
-
-        if norms2 > 1e-30 && abs(sv) > 1e-30
-            theta_star = phi * sv / norms2
-            dv = dot(p, v)
-            beta_mop = abs(dv) > 1e-30 ? dot(v .- theta_star .* s, Gx_new) / dv : 0.0
-            Gn2 = dot(Gx_new, Gx_new)
-            r_coeff = Gn2 > 1e-30 ? dot(Gx_new, p) / Gn2 : 0.0
-            p = -(phi + beta_mop * r_coeff) .* Gx_new .+ beta_mop .* p
-        else
-            p = -phi .* Gx_new
-        end
+        s = z .- x
+        update = _sopp_next_direction(m, Gx, Gz, Gx_new, s, p, phi)
+        p = update.direction
+        phi = update.lambda
+        restarts += update.restarted
 
         x = x_new; Gx = Gx_new; normGx = normGx_new
-        normGx < eps && (_pcb_done!(cb, true); return SolverResult(true, k, fe[], normGx, time()-t0, x))
-        norm(p) * 10 < eps && (_pcb_done!(cb, true); return SolverResult(true, k, fe[], normGx, time()-t0, x))
+        norm(p) * 10 < eps && return _finish(
+            cb, false, :stalled_direction, k, fe[], normGx, t0_ns, x;
+            restarts=restarts)
     end
-    _pcb_done!(cb, false)
-    return SolverResult(false, maxiter, fe[], normGx, time()-t0, x)
+    return _finish(cb, false, :maxiter, maxiter, fe[], normGx, t0_ns, x;
+                   restarts=restarts)
 end
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# GCGPM
+# SDLP
 # ═══════════════════════════════════════════════════════════════════════════════
 
-function solve(m::GCGPMMethod, prob::TestProblem, x0::Vector{Float64};
-               eps=1e-11, maxiter=2000, cb::ProgressCallback=ProgressCallback(), kwargs...)
-    t0 = time()
+function solve(m::SDLPMethod, prob::TestProblem, x0::Vector{Float64};
+               eps=1e-11, maxiter=2000, cb::ProgressCallback=ProgressCallback(),
+               on_iter::Union{Nothing,Function}=nothing, kwargs...)
+    t0_ns = time_ns()
     fe = Ref(0)
     G(x) = (fe[] += 1; prob.G(x))
 
-    x = copy(x0); Gx = G(x); normGx = norm(Gx)
-    normGx < eps && (_pcb_done!(cb, true); return SolverResult(true, 0, fe[], normGx, time()-t0, x))
+    x = prob.proj(copy(x0)); Gx = G(x); normGx = norm(Gx)
+    on_iter === nothing || on_iter(0, normGx)
+    normGx <= eps && return _finish(
+        cb, true, :converged_initial, 0, fe[], normGx, t0_ns, x)
 
-    d = -Gx; phi = m.lambda0; gamma_val = m.gamma
+    d = -Gx; phi = m.lambda0; gamma_val = m.gamma; restarts = 0
 
     for k in 1:maxiter
         _pcb(cb, k, normGx)
-        _isnan_bail(normGx, d) && (_pcb_done!(cb, false); return SolverResult(false, k, fe[], NaN, time()-t0, x))
+        _isnan_bail(normGx, d) && return _finish(
+            cb, false, :nonfinite, k, fe[], NaN, t0_ns, x; restarts=restarts)
 
         alpha, z, Gz = _backtrack_ours(G, x, d, m.rho, m.eta, m.zeta, m.zeta1, m.zeta2, fe)
-        alpha === nothing && (_pcb_done!(cb, false); return SolverResult(false, k, fe[], normGx, time()-t0, x))
+        alpha === nothing && return _finish(
+            cb, false, :line_search_failed, k, fe[], normGx, t0_ns, x; restarts=restarts)
         normGz = norm(Gz)
-        if normGz < eps; _pcb_done!(cb, true); return SolverResult(true, k, fe[], normGz, time()-t0, z); end
+        if normGz <= eps && _is_feasible(prob, z)
+            on_iter === nothing || on_iter(k, normGz)
+            return _finish(cb, true, :converged_trial, k, fe[], normGz, t0_ns, z;
+                           restarts=restarts)
+        end
+        (!isfinite(normGz) || normGz == 0.0) && return _finish(
+            cb, false, :invalid_trial_residual, k, fe[], normGz, t0_ns, x;
+            restarts=restarts)
 
         tau_k = dot(Gz, x .- z) / normGz^2
         x_new = prob.proj(x .- gamma_val .* tau_k .* Gz)
         Gx_new = G(x_new); normGx_new = norm(Gx_new)
-
-        gamma_val = normGx_new < normGx ? min(gamma_val * 1.1, 1.70) : min(max(gamma_val * 1.05, 1.05), 1.95)
-
-        y = Gx_new .- Gx
-        Gp = dot(Gx_new, d); yp = dot(y, d)
-        r_k = 1.0 + max(0.0, -Gp / (yp + sign(yp)*1e-30))
-        w = y .+ r_k .* d; wd = dot(w, d)
-
-        if abs(wd) > 1e-30
-            c_k = Gp / wd; ww = dot(w, w); dd = dot(d, d)
-            if !(normGx_new < 0.6 * normGx) && dd > 1e-30
-                phi = spectral_proj(max(ww/wd, wd/dd), m.alpha_min, m.alpha_max)
-            end
-            beta_k = (dot(Gx_new, w) - phi * c_k * ww) / wd
-            d = -phi .* Gx_new .+ beta_k .* d .+ m.tau .* c_k .* w
-        else
-            d = -phi .* Gx_new
+        on_iter === nothing || on_iter(k, normGx_new)
+        if normGx_new <= eps
+            return _finish(cb, true, :converged_projected, k, fe[], normGx_new,
+                           t0_ns, x_new; restarts=restarts)
         end
+        !isfinite(normGx_new) && return _finish(
+            cb, false, :nonfinite, k, fe[], normGx_new, t0_ns, x_new;
+            restarts=restarts)
+
+        gamma_val = _update_gamma(m, gamma_val, normGx_new < normGx)
+
+        update = _sdlp_next_direction(m, Gx, Gx_new, d, phi)
+        d = update.direction
+        phi = update.lambda
+        restarts += update.restarted
 
         x = x_new; Gx = Gx_new; normGx = normGx_new
-        normGx < eps && (_pcb_done!(cb, true); return SolverResult(true, k, fe[], normGx, time()-t0, x))
-        norm(d) * 10 < eps && (_pcb_done!(cb, true); return SolverResult(true, k, fe[], normGx, time()-t0, x))
+        norm(d) * 10 < eps && return _finish(
+            cb, false, :stalled_direction, k, fe[], normGx, t0_ns, x;
+            restarts=restarts)
     end
-    _pcb_done!(cb, false)
-    return SolverResult(false, maxiter, fe[], normGx, time()-t0, x)
+    return _finish(cb, false, :maxiter, maxiter, fe[], normGx, t0_ns, x;
+                   restarts=restarts)
 end
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -178,19 +302,23 @@ end
 # ═══════════════════════════════════════════════════════════════════════════════
 
 function solve(m::MOPCGMMethod, prob::TestProblem, x0::Vector{Float64};
-               eps=1e-11, maxiter=2000, cb::ProgressCallback=ProgressCallback(), kwargs...)
-    t0 = time()
+               eps=1e-11, maxiter=2000, cb::ProgressCallback=ProgressCallback(),
+               on_iter::Union{Nothing,Function}=nothing, kwargs...)
+    t0_ns = time_ns()
     fe = Ref(0)
     F(x) = (fe[] += 1; prob.G(x))
 
     x = copy(x0); Fx = F(x); normFx = norm(Fx)
-    normFx < eps && (_pcb_done!(cb, true); return SolverResult(true, 0, fe[], normFx, time()-t0, x))
+    on_iter === nothing || on_iter(0, normFx)
+    normFx <= eps && return _finish(
+        cb, true, :converged_initial, 0, fe[], normFx, t0_ns, x)
 
     d = -Fx
 
     for k in 1:maxiter
         _pcb(cb, k, normFx)
-        _isnan_bail(normFx, d) && (_pcb_done!(cb, false); return SolverResult(false, k, fe[], NaN, time()-t0, x))
+        _isnan_bail(normFx, d) && return _finish(
+            cb, false, :nonfinite, k, fe[], NaN, t0_ns, x)
 
         dd = dot(d, d); alpha = m.rho; z = x; Fz = Fx
         ls_ok = false
@@ -200,14 +328,26 @@ function solve(m::MOPCGMMethod, prob::TestProblem, x0::Vector{Float64};
             if -dot(Fz, d) >= m.zeta * alpha * dd; ls_ok = true; break; end
             alpha <= 1e-5 && break
         end
-        ls_ok || (_pcb_done!(cb, false); return SolverResult(false, k, fe[], normFx, time()-t0, x))
+        ls_ok || return _finish(
+            cb, false, :line_search_failed, k, fe[], normFx, t0_ns, x)
 
         normFmu = norm(Fz)
-        if normFmu < eps; _pcb_done!(cb, true); return SolverResult(true, k, fe[], normFmu, time()-t0, z); end
+        if normFmu <= eps && _is_feasible(prob, z)
+            on_iter === nothing || on_iter(k, normFmu)
+            return _finish(cb, true, :converged_trial, k, fe[], normFmu, t0_ns, z)
+        end
+        (!isfinite(normFmu) || normFmu == 0.0) && return _finish(
+            cb, false, :invalid_trial_residual, k, fe[], normFmu, t0_ns, x)
 
         bk = dot(Fz, x .- z) / normFmu^2
         x_new = prob.proj(x .- bk .* Fz)
         Fx_new = F(x_new)
+        normFx_new = norm(Fx_new)
+        on_iter === nothing || on_iter(k, normFx_new)
+        normFx_new <= eps && return _finish(
+            cb, true, :converged_projected, k, fe[], normFx_new, t0_ns, x_new)
+        !isfinite(normFx_new) && return _finish(
+            cb, false, :nonfinite, k, fe[], normFx_new, t0_ns, x_new)
 
         s = z .- x; y = Fx_new .- Fx .+ m.lambda .* s
         ss = dot(s, s); sy = dot(s, y)
@@ -218,12 +358,11 @@ function solve(m::MOPCGMMethod, prob::TestProblem, x0::Vector{Float64};
         r_coeff = Fn2 > 1e-30 ? dot(Fx_new, d) / Fn2 : 0.0
         d = -(1.0 + beta_mop * r_coeff) .* Fx_new .+ beta_mop .* d
 
-        x = x_new; Fx = Fx_new; normFx = norm(Fx)
-        normFx < eps && (_pcb_done!(cb, true); return SolverResult(true, k, fe[], normFx, time()-t0, x))
-        norm(d) * 10 < eps && (_pcb_done!(cb, true); return SolverResult(true, k, fe[], normFx, time()-t0, x))
+        x = x_new; Fx = Fx_new; normFx = normFx_new
+        norm(d) * 10 < eps && return _finish(
+            cb, false, :stalled_direction, k, fe[], normFx, t0_ns, x)
     end
-    _pcb_done!(cb, false)
-    return SolverResult(false, maxiter, fe[], normFx, time()-t0, x)
+    return _finish(cb, false, :maxiter, maxiter, fe[], normFx, t0_ns, x)
 end
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -231,19 +370,23 @@ end
 # ═══════════════════════════════════════════════════════════════════════════════
 
 function solve(m::CGPMMethod, prob::TestProblem, x0::Vector{Float64};
-               eps=1e-11, maxiter=2000, cb::ProgressCallback=ProgressCallback(), kwargs...)
-    t0 = time()
+               eps=1e-11, maxiter=2000, cb::ProgressCallback=ProgressCallback(),
+               on_iter::Union{Nothing,Function}=nothing, kwargs...)
+    t0_ns = time_ns()
     fe = Ref(0)
     F(x) = (fe[] += 1; prob.G(x))
 
     x = copy(x0); Fx = F(x); normFx = norm(Fx)
-    normFx < eps && (_pcb_done!(cb, true); return SolverResult(true, 0, fe[], normFx, time()-t0, x))
+    on_iter === nothing || on_iter(0, normFx)
+    normFx <= eps && return _finish(
+        cb, true, :converged_initial, 0, fe[], normFx, t0_ns, x)
 
     d = -Fx
 
     for k in 1:maxiter
         _pcb(cb, k, normFx)
-        _isnan_bail(normFx, d) && (_pcb_done!(cb, false); return SolverResult(false, k, fe[], NaN, time()-t0, x))
+        _isnan_bail(normFx, d) && return _finish(
+            cb, false, :nonfinite, k, fe[], NaN, t0_ns, x)
 
         dnorm2 = dot(d, d); alpha = m.beta_ls; z = x; Fz = Fx
         ls_ok = false
@@ -253,14 +396,26 @@ function solve(m::CGPMMethod, prob::TestProblem, x0::Vector{Float64};
             if -dot(Fz, d) >= m.sigma * alpha * norm(Fz) * dnorm2; ls_ok = true; break; end
             alpha <= 1e-5 && break
         end
-        ls_ok || (_pcb_done!(cb, false); return SolverResult(false, k, fe[], normFx, time()-t0, x))
+        ls_ok || return _finish(
+            cb, false, :line_search_failed, k, fe[], normFx, t0_ns, x)
 
         normFz = norm(Fz)
-        if normFz < eps; _pcb_done!(cb, true); return SolverResult(true, k, fe[], normFz, time()-t0, z); end
+        if normFz <= eps && _is_feasible(prob, z)
+            on_iter === nothing || on_iter(k, normFz)
+            return _finish(cb, true, :converged_trial, k, fe[], normFz, t0_ns, z)
+        end
+        (!isfinite(normFz) || normFz == 0.0) && return _finish(
+            cb, false, :invalid_trial_residual, k, fe[], normFz, t0_ns, x)
 
         tau_k = dot(Fz, x .- z) / normFz^2
         x_new = prob.proj(x .- tau_k .* Fz)
         Fx_new = F(x_new)
+        normFx_new = norm(Fx_new)
+        on_iter === nothing || on_iter(k, normFx_new)
+        normFx_new <= eps && return _finish(
+            cb, true, :converged_projected, k, fe[], normFx_new, t0_ns, x_new)
+        !isfinite(normFx_new) && return _finish(
+            cb, false, :nonfinite, k, fe[], normFx_new, t0_ns, x_new)
 
         y = Fx_new .- Fx; dd = dot(d, d)
         lambda_cgpm = 1.0 + max(0.0, -dot(y, d) / max(dd, 1e-30))
@@ -274,12 +429,11 @@ function solve(m::CGPMMethod, prob::TestProblem, x0::Vector{Float64};
             d = -m.sigma1 .* Fx_new
         end
 
-        x = x_new; Fx = Fx_new; normFx = norm(Fx)
-        normFx < eps && (_pcb_done!(cb, true); return SolverResult(true, k, fe[], normFx, time()-t0, x))
-        norm(d) * 10 < eps && (_pcb_done!(cb, true); return SolverResult(true, k, fe[], normFx, time()-t0, x))
+        x = x_new; Fx = Fx_new; normFx = normFx_new
+        norm(d) * 10 < eps && return _finish(
+            cb, false, :stalled_direction, k, fe[], normFx, t0_ns, x)
     end
-    _pcb_done!(cb, false)
-    return SolverResult(false, maxiter, fe[], normFx, time()-t0, x)
+    return _finish(cb, false, :maxiter, maxiter, fe[], normFx, t0_ns, x)
 end
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -287,20 +441,25 @@ end
 # ═══════════════════════════════════════════════════════════════════════════════
 
 function solve(m::STTDFPMMethod, prob::TestProblem, x0::Vector{Float64};
-               eps=1e-11, maxiter=2000, cb::ProgressCallback=ProgressCallback(), kwargs...)
-    t0 = time()
+               eps=1e-11, maxiter=2000, cb::ProgressCallback=ProgressCallback(),
+               on_iter::Union{Nothing,Function}=nothing, kwargs...)
+    t0_ns = time_ns()
     fe = Ref(0)
     F(x) = (fe[] += 1; prob.G(x))
 
     x = copy(x0); Fx = F(x); normFx = norm(Fx)
-    normFx < eps && (_pcb_done!(cb, true); return SolverResult(true, 0, fe[], normFx, time()-t0, x))
+    on_iter === nothing || on_iter(0, normFx)
+    normFx <= eps && return _finish(
+        cb, true, :converged_initial, 0, fe[], normFx, t0_ns, x)
 
     d = -Fx
 
     for k in 1:maxiter
         _pcb(cb, k, normFx)
-        _isnan_bail(normFx, d) && (_pcb_done!(cb, false); return SolverResult(false, k, fe[], NaN, time()-t0, x))
-        norm(d) * 10 < eps && (_pcb_done!(cb, true); return SolverResult(true, k, fe[], normFx, time()-t0, x))
+        _isnan_bail(normFx, d) && return _finish(
+            cb, false, :nonfinite, k, fe[], NaN, t0_ns, x)
+        norm(d) * 10 < eps && return _finish(
+            cb, false, :stalled_direction, k, fe[], normFx, t0_ns, x)
 
         dd = dot(d, d); tau = 1.0; z = x; Fz = Fx; ls_ok = false
         for j in 0:50
@@ -310,14 +469,26 @@ function solve(m::STTDFPMMethod, prob::TestProblem, x0::Vector{Float64};
             if -dot(Fz, d) >= m.sigma * tau * proj_val * dd; ls_ok = true; break; end
             tau <= 1e-5 && break
         end
-        ls_ok || (_pcb_done!(cb, false); return SolverResult(false, k, fe[], normFx, time()-t0, x))
+        ls_ok || return _finish(
+            cb, false, :line_search_failed, k, fe[], normFx, t0_ns, x)
 
         normFz = norm(Fz)
-        if normFz < eps; _pcb_done!(cb, true); return SolverResult(true, k, fe[], normFz, time()-t0, z); end
+        if normFz <= eps && _is_feasible(prob, z)
+            on_iter === nothing || on_iter(k, normFz)
+            return _finish(cb, true, :converged_trial, k, fe[], normFz, t0_ns, z)
+        end
+        (!isfinite(normFz) || normFz == 0.0) && return _finish(
+            cb, false, :invalid_trial_residual, k, fe[], normFz, t0_ns, x)
 
         mu_k = dot(Fz, x .- z) / normFz^2
         x_new = prob.proj(x .- m.gamma .* mu_k .* Fz)
         Fx_new = F(x_new)
+        normFx_new = norm(Fx_new)
+        on_iter === nothing || on_iter(k, normFx_new)
+        normFx_new <= eps && return _finish(
+            cb, true, :converged_projected, k, fe[], normFx_new, t0_ns, x_new)
+        !isfinite(normFx_new) && return _finish(
+            cb, false, :nonfinite, k, fe[], normFx_new, t0_ns, x_new)
 
         y = Fx_new .- Fx
         s_sttd = (x_new .- x) .+ m.r_param .* y
@@ -333,9 +504,7 @@ function solve(m::STTDFPMMethod, prob::TestProblem, x0::Vector{Float64};
         end
         d = -alpha_I .* Fx_new .+ beta_k .* d .- alpha_II .* y
 
-        x = x_new; Fx = Fx_new; normFx = norm(Fx)
-        normFx < eps && (_pcb_done!(cb, true); return SolverResult(true, k, fe[], normFx, time()-t0, x))
+        x = x_new; Fx = Fx_new; normFx = normFx_new
     end
-    _pcb_done!(cb, false)
-    return SolverResult(false, maxiter, fe[], normFx, time()-t0, x)
+    return _finish(cb, false, :maxiter, maxiter, fe[], normFx, t0_ns, x)
 end

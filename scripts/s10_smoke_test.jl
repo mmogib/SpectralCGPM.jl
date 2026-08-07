@@ -65,8 +65,8 @@ println(tee, "  proj_Rn_plus(x) = max(x,0)  ✓")
 println(tee, "\n--- Part 4: All solvers × all problems (n=100, x0=ones, eps=1e-6) ---")
 
 methods = [
-    GMOPCGMMethod(),
-    GCGPMMethod(),
+    SOPPMethod(),
+    SDLPMethod(),
     MOPCGMMethod(),
     CGPMMethod(),
     STTDFPMMethod(),
@@ -119,8 +119,8 @@ end
 println(tee, "")
 
 # ── Part 5: Test across dimensions ───────────────────────────────────────────
-println(tee, "\n--- Part 5: Dimension scaling (GMOPCGM on P1, x0=ones) ---")
-gm = GMOPCGMMethod()
+println(tee, "\n--- Part 5: Dimension scaling (SOPP on P1, x0=ones) ---")
+gm = SOPPMethod()
 for dim in [100, 1000, 5000]
     prob = get_problem(1, dim)
     x0 = ones(dim)

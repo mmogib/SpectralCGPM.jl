@@ -7,7 +7,7 @@
 #   julia --project=. scripts/s45_benchmark.jl --all
 #   julia --project=. scripts/s45_benchmark.jl --all --resume
 #   julia --project=. scripts/s45_benchmark.jl --problems=1-5,10 --dims=1000,10000
-#   julia --project=. scripts/s45_benchmark.jl --methods=GMOPCGM,GCGPM
+#   julia --project=. scripts/s45_benchmark.jl --methods=SOPP,SDLP
 #   julia --project=. scripts/s45_benchmark.jl --inits=0,1.0,8.2
 #   julia --project=. scripts/s45_benchmark.jl --summary
 #   julia --project=. scripts/s45_benchmark.jl --problems=1 --verbose
@@ -21,16 +21,17 @@ const EPS     = 1e-11
 const MAXITER = 2000
 
 const ALL_METHODS = Dict(
-    "GMOPCGM"  => GMOPCGMMethod(),
-    "GCGPM"    => GCGPMMethod(),
+    "SOPP"     => SOPPMethod(),
+    "SDLP"     => SDLPMethod(),
     "MOPCGM"   => MOPCGMMethod(),
     "CGPM"     => CGPMMethod(),
     "STTDFPM"  => STTDFPMMethod(),
 )
-const METHOD_ORDER = ["GMOPCGM", "GCGPM", "MOPCGM", "CGPM", "STTDFPM"]
+const METHOD_ORDER = ["SOPP", "SDLP", "MOPCGM", "CGPM", "STTDFPM"]
 
 const RAW_COLS = ["method", "problem", "n", "x0_label", "converged",
-                  "iterations", "f_evals", "residual", "cpu_time"]
+                  "status", "restarts", "iterations", "f_evals", "residual",
+                  "cpu_time"]
 
 # ── ARGS parsing ─────────────────────────────────────────────────────────────
 
@@ -105,7 +106,7 @@ end
 if !cfg[:summary] && isfile(raw_csv)
     backup_dir = joinpath(results_dir, "backup")
     mkpath(backup_dir)
-    ts = Dates.format(now(), "yyyymmdd_HHMMss")
+    ts = Dates.format(now(), "yyyymmdd_HHMMSS")
     backup_path = joinpath(backup_dir, "raw_$ts.csv")
     cp(raw_csv, backup_path)
     println(tee, "Backup: $backup_path")
@@ -202,6 +203,7 @@ println(tee, "Benchmark")
 @tprintf(tee, "  Dims:     %s\n", join(cfg[:dims], ","))
 @tprintf(tee, "  Methods:  %s\n", join(cfg[:methods], ","))
 @tprintf(tee, "  Runs:     %d\n", length(work))
+@tprintf(tee, "  Threads:  Julia=%d, BLAS=%d\n", Threads.nthreads(), BLAS.get_num_threads())
 println(tee, "=" ^ 75)
 
 if isempty(work)
@@ -224,23 +226,28 @@ n_fail = Ref(0)
 
 # Single progress bar for the entire run
 prog = Progress(length(work); barlen=40, showspeed=true, desc="  Running: ")
-cb = ProgressCallback(prog, "", MAXITER, Ref(0), length(work), n_conv, n_fail)
 
 for (i, w) in enumerate(work)
     prob = get_problem(w.prob_id, w.dim)
-    cb.label = "$(w.mname) $(prob.name) n=$(w.dim) x0=$(w.x0_label)"
-    cb.maxiter = MAXITER
+    current_label = "$(w.mname) $(prob.name) n=$(w.dim) x0=$(w.x0_label)"
 
     result = try
-        solve(w.method, prob, w.x0; eps=EPS, maxiter=MAXITER, cb=cb)
+        solve(w.method, prob, w.x0; eps=EPS, maxiter=MAXITER)
     catch e
-        _pcb_done!(cb, false)
+        @printf(tee.log, "  ERROR: %s: %s\n", current_label, sprint(showerror, e))
         SolverResult(false, 0, 0, NaN, 0.0, w.x0)
     end
 
-    @printf(raw_io, "%s,%s,%d,%s,%s,%d,%d,%.10e,%.6f\n",
+    result.converged ? (n_conv[] += 1) : (n_fail[] += 1)
+    ProgressMeter.update!(prog, i;
+        showvalues=[(:done, "$i/$(length(work))"),
+                    (:converged, n_conv[]), (:failed, n_fail[]),
+                    (:current, current_label)])
+
+    @printf(raw_io, "%s,%s,%d,%s,%s,%s,%d,%d,%d,%.10e,%.9f\n",
             w.mname, prob.name, w.dim, w.x0_label,
-            result.converged, result.iterations, result.f_evals,
+            result.converged, string(result.status), result.restarts,
+            result.iterations, result.f_evals,
             result.residual, result.cpu_time)
     flush(raw_io)
 end

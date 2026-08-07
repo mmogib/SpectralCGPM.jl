@@ -1,15 +1,20 @@
-# problems.jl — 20 test problems for nonlinear monotone equations
+# problems.jl — 18 paper problems selected from 20 internally numbered maps
+# Internal G7 and G9 are excluded. Consequently paper P7 is internal G8,
+# paper P16 is internal G18, and paper P18 is internal G20.
 
 # Projection: Gamma = R^n_+ = {x >= 0} (used for most problems, matching oldcode)
 proj_Rn_plus(x) = max.(x, 0.0)
 
-# Projection: Gamma = [1, inf)^n (for P18, minimal function requires x > 0)
+# Projection: Gamma = [1, inf)^n (paper P16/internal G18 requires x > 0)
 proj_box_one(x) = max.(x, 1.0)
 
 # ── Problem functions (defined at top level to avoid closure name collisions) ──
 
 G1(x)  = 2.0 .* x .- sin.(x)
-G2(x, n) = log.(x .+ 1.0) .- x ./ n
+function G2(x, n)
+    any(v -> v <= -1.0, x) && return fill(NaN, length(x))
+    return log.(x .+ 1.0) .- x ./ n
+end
 G3(x)  = exp.(x) .- 1.0
 
 function G4(x)
@@ -68,7 +73,7 @@ function G8(x)
     for i in 2:m-1
         out[i] = x[i] * (x[i-1]^2 + 2x[i]^2 + x[i+1]^2) - 1.0
     end
-    out[m] = x[m] * (x[m-1]^2 + x[m]^2)
+    out[m] = x[m] * (x[m-1]^2 + x[m]^2) - 1.0
     return out
 end
 
@@ -105,6 +110,7 @@ end
 G17(x) = 2.0 .* x .- sin.(abs.(x))
 
 function G18(x)
+    any(v -> v <= 0.0, x) && return fill(NaN, length(x))
     lx = log.(x)
     ex = exp.(x)
     return 0.5 .* (lx .+ ex .- sqrt.((lx .- ex).^2 .+ 1e-10))

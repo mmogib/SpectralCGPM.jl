@@ -14,9 +14,9 @@ end
 
 abstract type AbstractMethod end
 
-# --- Our method 1: GMOPCGM ---
-struct GMOPCGMMethod <: AbstractMethod
-    tau::Float64       # modification parameter in v_{k-1} = y_{k-1} + tau * s_{k-1}
+# --- Our method 1: SOPP ---
+struct SOPPMethod <: AbstractMethod
+    tau::Float64       # regularization in q_k = G(z_k) - G(x_k) + tau * s_k
     rho::Float64       # backtracking contraction
     beta::Float64      # initial step size for line search
     zeta::Float64      # line search parameter
@@ -24,18 +24,24 @@ struct GMOPCGMMethod <: AbstractMethod
     alpha_max::Float64 # spectral projection upper bound
     lambda0::Float64   # initial spectral parameter
     gamma::Float64     # projection relaxation parameter in (0,2)
+    c::Float64         # orthogonal-component clipping bound, c > alpha_max
     zeta1::Float64     # line search norm projection lower bound
     zeta2::Float64     # line search norm projection upper bound
 end
 
-function GMOPCGMMethod(; tau=1.0, rho=0.8, beta=0.5, zeta=1e-4,
+function SOPPMethod(; tau=1.0, rho=0.8, beta=0.5, zeta=1e-4,
         alpha_min=0.1, alpha_max=2.0, lambda0=1.0, gamma=1.1,
-        zeta1=1.0, zeta2=1.0)
-    GMOPCGMMethod(tau, rho, beta, zeta, alpha_min, alpha_max, lambda0, gamma, zeta1, zeta2)
+        c=alpha_max + 1.0, zeta1=1.0, zeta2=1.0)
+    @assert tau > 0 "SOPP requires tau > 0"
+    @assert 0 < alpha_min <= 1 <= alpha_max "SOPP requires 0 < alpha_min <= 1 <= alpha_max"
+    @assert alpha_min <= lambda0 <= alpha_max "SOPP requires lambda0 in [alpha_min, alpha_max]"
+    @assert c > alpha_max "SOPP requires c > alpha_max"
+    @assert 1.0 <= gamma <= 1.8 "SOPP adaptive gamma must start in [1.0, 1.8]"
+    SOPPMethod(tau, rho, beta, zeta, alpha_min, alpha_max, lambda0, gamma, c, zeta1, zeta2)
 end
 
-# --- Our method 2: GCGPM ---
-struct GCGPMMethod <: AbstractMethod
+# --- Our method 2: SDLP ---
+struct SDLPMethod <: AbstractMethod
     tau::Float64
     rho::Float64
     eta::Float64       # initial step size for line search
@@ -48,10 +54,15 @@ struct GCGPMMethod <: AbstractMethod
     zeta2::Float64
 end
 
-function GCGPMMethod(; tau=0.001, rho=0.5, eta=0.6, zeta=0.1,
+function SDLPMethod(; tau=0.001, rho=0.5, eta=0.6, zeta=0.1,
         alpha_min=0.55, alpha_max=4.9, lambda0=1.0, gamma=1.8,
         zeta1=1.0, zeta2=1.0)
-    GCGPMMethod(tau, rho, eta, zeta, alpha_min, alpha_max, lambda0, gamma, zeta1, zeta2)
+    @assert 0 <= tau <= 1 "SDLP requires tau in [0, 1]"
+    @assert alpha_min > (1 + tau) / 2 "SDLP requires alpha_min > (1 + tau) / 2"
+    @assert alpha_max >= alpha_min "SDLP requires alpha_max >= alpha_min"
+    @assert alpha_min <= lambda0 <= alpha_max "SDLP requires lambda0 in [alpha_min, alpha_max]"
+    @assert 1.0 <= gamma <= 1.95 "SDLP adaptive gamma must start in [1.0, 1.95]"
+    SDLPMethod(tau, rho, eta, zeta, alpha_min, alpha_max, lambda0, gamma, zeta1, zeta2)
 end
 
 # --- Competitor: MOPCGM (Sabi'u et al. 2023, Algorithm 2.1) ---
@@ -98,14 +109,25 @@ struct SolverResult
     iterations::Int
     f_evals::Int
     residual::Float64
-    cpu_time::Float64          # CPU time in seconds
+    cpu_time::Float64          # monotonic elapsed wall-clock seconds (legacy field name)
     x::Vector{Float64}
+    status::Symbol             # :converged_*, :stalled, :line_search_failed, ...
+    restarts::Int              # floating-point safeguard restarts
+end
+
+function SolverResult(converged::Bool, iterations::Integer, f_evals::Integer,
+                      residual::Real, cpu_time::Real, x::Vector{Float64};
+                      status::Symbol=(converged ? :converged : :failed),
+                      restarts::Integer=0)
+    @assert restarts >= 0 "restart count must be nonnegative"
+    SolverResult(converged, Int(iterations), Int(f_evals), Float64(residual),
+                 Float64(cpu_time), x, status, Int(restarts))
 end
 
 # ── Convenience ────────────────────────────────────────────────────────────────
 
-method_name(::GMOPCGMMethod) = "GMOPCGM"
-method_name(::GCGPMMethod) = "GCGPM"
+method_name(::SOPPMethod) = "SOPP"
+method_name(::SDLPMethod) = "SDLP"
 method_name(::MOPCGMMethod) = "MOPCGM"
 method_name(::CGPMMethod) = "CGPM"
 method_name(::STTDFPMMethod) = "STTDFPM"

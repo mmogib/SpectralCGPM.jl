@@ -125,7 +125,7 @@ To do a quick test first (2 datasets, 1 trial):
 julia --project=. scripts/s55_logreg.jl --quick
 ```
 
-Supports `--resume`, `--datasets=a1a.t,colon-cancer`, `--methods=GCGPM,GMOPCGM`, and `--summary`.
+Supports `--resume`, `--datasets=a1a.t,colon-cancer`, `--methods=SDLP,SOPP`, and `--summary`.
 
 ## Step 7: Generate tables
 
@@ -205,7 +205,7 @@ SpectralCGPM.jl/
 
 ## Experiment setup
 
-- **Methods:** GMOPCGM, GCGPM (proposed) and MOPCGM, CGPM, STTDFPM (competitors)
+- **Methods:** SOPP, SDLP (proposed) and MOPCGM, CGPM, STTDFPM (competitors)
 - **Benchmark:** 18 problems, 6 dimensions (1K--120K), 10 initial points = 5,400 runs
 - **Compressed sensing:** 4 sparsity ratios, 3 measurement ratios, 4 noise levels, 5 trials = 1,200 runs
 - **Logistic regression:** 12 LIBSVM datasets, 5 trials = 300 runs

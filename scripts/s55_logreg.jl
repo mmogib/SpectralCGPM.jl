@@ -15,7 +15,7 @@
 #   julia --project=. scripts/s55_logreg.jl --quick              # a1a.t + colon-cancer, 1 trial
 #   julia --project=. scripts/s55_logreg.jl --resume             # skip completed rows
 #   julia --project=. scripts/s55_logreg.jl --datasets=a1a.t,colon-cancer
-#   julia --project=. scripts/s55_logreg.jl --methods=GCGPM,GMOPCGM
+#   julia --project=. scripts/s55_logreg.jl --methods=SDLP,SOPP
 #   julia --project=. scripts/s55_logreg.jl --summary            # print summary and exit
 #
 # Output:
@@ -42,8 +42,8 @@ const ALL_DATASETS = [
 ]
 
 const ALL_METHODS = [
-    ("GMOPCGM", GMOPCGMMethod()),
-    ("GCGPM",   GCGPMMethod()),
+    ("SOPP",    SOPPMethod()),
+    ("SDLP",    SDLPMethod()),
     ("MOPCGM",  MOPCGMMethod()),
     ("CGPM",    CGPMMethod()),
     ("STTDFPM", STTDFPMMethod()),
@@ -174,6 +174,7 @@ println(tee, "=" ^ 80)
 @tprintf(tee, "  datasets: %s\n", join(DATASETS_RUN, ", "))
 @tprintf(tee, "  methods:  %s\n", join([m[1] for m in METHODS_RUN], ", "))
 @tprintf(tee, "  quick=%s, resume=%s\n", quick_mode, do_resume)
+@tprintf(tee, "  threads: Julia=%d, BLAS=%d\n", Threads.nthreads(), BLAS.get_num_threads())
 println(tee, "-" ^ 80)
 
 # ── Resume detection ─────────────────────────────────────────────────────────
@@ -203,7 +204,6 @@ n_done = Ref(0)
 n_conv = Ref(0)
 n_fail = Ref(0)
 prog = Progress(total_solves; barlen=40, showspeed=true, desc="  LogReg: ")
-cb = ProgressCallback(prog, "", MAXITER, n_done, total_solves, n_conv, n_fail)
 
 # ── Main loop ────────────────────────────────────────────────────────────────
 
@@ -215,6 +215,10 @@ for ds_name in DATASETS_RUN
             n_done[] += 1
             n_fail[] += 1
         end
+        ProgressMeter.update!(prog, n_done[];
+            showvalues=[(:done, "$(n_done[])/$total_solves"),
+                        (:converged, n_conv[]), (:failed, n_fail[]),
+                        (:current, "SKIP missing $ds_name")])
         continue
     end
 
@@ -242,20 +246,27 @@ for ds_name in DATASETS_RUN
                 continue
             end
 
-            cb.label = "$mname $ds_name (N=$N_samples n=$n_features) t=$trial"
+            current_label = "$mname $ds_name (N=$N_samples n=$n_features) t=$trial"
             result = try
-                solve(method, prob, x0; eps=EPS_LR, maxiter=MAXITER, cb=cb,
+                solve(method, prob, x0; eps=EPS_LR, maxiter=MAXITER,
                       stall_limit=typemax(Int))
             catch e
-                _pcb_done!(cb, false)
-                @printf(tee.log, "    ERROR: %s %s trial=%d: %s\n", mname, ds_name, trial, e)
+                @printf(tee.log, "    ERROR: %s %s trial=%d: %s\n",
+                        mname, ds_name, trial, sprint(showerror, e))
                 SolverResult(false, 0, 0, NaN, 0.0, x0)
             end
+
+            n_done[] += 1
+            result.converged ? (n_conv[] += 1) : (n_fail[] += 1)
+            ProgressMeter.update!(prog, n_done[];
+                showvalues=[(:done, "$(n_done[])/$total_solves"),
+                            (:converged, n_conv[]), (:failed, n_fail[]),
+                            (:current, current_label)])
 
             # Classification accuracy
             acc = result.converged ? mean(sign.(A * result.x) .== b) : NaN
 
-            @printf(raw_io, "%s,%s,%d,%d,%d,%s,%d,%d,%.6f,%.6e,%.6f\n",
+            @printf(raw_io, "%s,%s,%d,%d,%d,%s,%d,%d,%.9f,%.6e,%.6f\n",
                     mname, ds_name, trial, n_features, N_samples,
                     result.converged, result.iterations, result.f_evals,
                     result.cpu_time, result.residual, acc)

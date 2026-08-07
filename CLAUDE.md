@@ -1,7 +1,7 @@
 # TwoGenDFM — Julia Implementation
 
 ## Overview
-Julia implementation of five derivative-free projection methods (GMOPCGM, GCGPM, MOPCGM, CGPM, STTDFPM) for solving large-scale nonlinear monotone equations with convex constraints. Style B (Flat Include).
+Julia implementation of five derivative-free projection methods (SOPP, SDLP, MOPCGM, CGPM, STTDFPM) for solving large-scale nonlinear monotone equations with convex constraints. Style B (Flat Include).
 
 ## Structure
 ```
@@ -42,19 +42,28 @@ jcode/
 ## Method Dispatch
 ```
 AbstractMethod
-├── GMOPCGMMethod   # Our method 1 (stall_limit kwarg)
-├── GCGPMMethod     # Our method 2
+├── SOPPMethod   # Our method 1 (stall_limit kwarg)
+├── SDLPMethod     # Our method 2
 ├── MOPCGMMethod    # Sabi'u et al. 2023
 ├── CGPMMethod      # Zheng et al. 2020
 └── STTDFPMMethod   # Ibrahim et al. 2023
 ```
 Each has `solve(m::Method, prob, x0; eps, maxiter, cb, kwargs...)`.
 
-## Safeguards in solvers
-- NaN/Inf guard: terminates immediately if residual or direction blows up
-- Line search failure: returns converged=false if no valid step found
-- Stall detection (GMOPCGM only): stops after `stall_limit` consecutive non-improving iterations (default 10, set to typemax(Int) for CS and logreg)
-- GCGPM gamma capped at 1.95 on non-improving branch (prevents exceeding 2.0)
+## Safeguards in solvers (rebuilt 2026-08-06, exchange 05 + review 06)
+- Honest termination: converged=true ONLY on a residual test (three sites per
+  solver: initial/trial/projected); all other exits are distinct failure
+  statuses in SolverResult.status
+- Floating-point restart (SOPP/SDLP): failed exact-positivity or
+  finiteness check restarts at -lambda*G (counted in SolverResult.restarts);
+  NO denominator perturbation hacks (1e-30 guards remain in comparators only)
+- Post-projection residual guard before forming any new direction component
+- x0 projected onto Gamma on entry (proposed methods)
+- Stall cap (SOPP): OPT-IN only, `stall_limit=typemax(Int)` by default
+  (the analyzed algorithm does not require monotone residuals)
+- Adaptive gamma_k: SOPP in [1.0,1.8] (start 1.1; x1.1 on improvement,
+  hold otherwise); SDLP in [1.0,1.95] (start 1.8; x1.1 / x1.05); lambda_k
+  updated EVERY iteration (old conditional thresholds removed)
 
 ## Key design decisions
 - **No LazySets**: projections are simple (max.(x, 0), max.(x, 1), clamp.(x, -C, C))
@@ -63,12 +72,29 @@ Each has `solve(m::Method, prob, x0; eps, maxiter, cb, kwargs...)`.
 - **All outputs in results/**: never write to paper/ from scripts
 - **logreg.jl**: precomputes bA = b.*A, preallocates work vectors, numerically stable sigmoid
 
-## Rules
-- **DO NOT run Julia scripts.** Mohammed runs scripts locally. Only create/edit scripts.
-- Tests may be run to verify code changes.
+## Rules (changed 2026-08-06, /join-revision adaptation)
+- **Codex implements and runs all jcode changes**, per channel-message specs
+  written by Claude (protocol: ../channels/README.md). Claude writes no code;
+  Claude specifies (math-first) and reviews Codex's work.
+- **Plots.jl exception**: Codex must NOT run scripts using Plots (terminal
+  crash). Codex gives Mohammed the exact commands (cwd jcode/); Mohammed runs;
+  Codex verifies the figures and reports with copy instructions.
+- All outputs to results/ — never write to paper/ from scripts.
 
-## Status (updated 2026-03-19)
-- All experiments complete: benchmark 5,400 + CS 1,200 + logreg 300
-- All tables and figures generated
-- GCGPM gamma fix applied, re-run complete
-- Logistic regression: 12 LIBSVM datasets, 5 trials, all 5 methods
+## Naming
+Current method names throughout: SOPP, SDLP (+ competitors MOPCGM, CGPM,
+STTDFPM). For the naming history / archive mapping, see the root CLAUDE.md —
+it is deliberately recorded there and nowhere in jcode/.
+
+## Status (updated 2026-08-06, post exchanges 08+09)
+- Methods rebuilt (05/06), problems aligned with paper Table 2 (08: G8 −1
+  restored; G2/G18 all-NaN domain sentinels — NaN trial = rejected step),
+  renamed SOPP/SDLP everywhere (09; zero remnants outside results/).
+  Tests 81/81; smoke: SOPP 18/18, SDLP 18/18, MOPCGM 18/18, CGPM 18/18,
+  STTDFPM 17/18 (known honest P19 failure). s45 CSV now carries
+  status/restarts columns; resume only valid against new-schema raw files.
+- OLD RESULTS INVALID: all benchmarks/CS/logreg must be rerun (formulas,
+  success criterion, fe accounting, names all changed).
+- Rerun-phase TODOs: run s45 full benchmark (Mohammed schedules), then
+  CS/logreg; sensitivity experiment; MSE metric check in CS scripts; logreg
+  interior-root check; public repository prep.

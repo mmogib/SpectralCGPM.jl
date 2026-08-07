@@ -27,6 +27,8 @@ function run_benchmark(methods::Vector, prob_ids, dimensions, initial_points_fn;
                         n = n,
                         x0_label = x0_name,
                         converged = r.converged,
+                        status = r.status,
+                        restarts = r.restarts,
                         iterations = r.iterations,
                         f_evals = r.f_evals,
                         residual = r.residual,
