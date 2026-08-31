@@ -1,9 +1,12 @@
-# Reproducing the Numerical Experiments
+# Reproducing the Accepted Paper's Numerical Results
 
 This repository contains the Julia code for the paper:
 
-> **Spectral conjugate gradient projection methods for large-scale monotone equations without Lipschitz continuity**
+> **Derivative-Free Spectral Projection Methods for Large-Scale Monotone Equations**
 > Kabenge Hamiss, Mohammed Alshahrani, Mujahid N. Syed
+
+The paper was accepted by *Mathematics* (MDPI) as manuscript
+mathematics-4520875 on 31 August 2026.
 
 Follow the steps below in order. Each step tells you what command to run and what output to expect.
 
@@ -11,13 +14,14 @@ Follow the steps below in order. Each step tells you what command to run and wha
 
 ## Step 0: Install Julia
 
-1. Go to <https://julialang.org/downloads/> and download the **Current stable release** (1.11 or newer).
+1. Go to <https://julialang.org/downloads/> and install Julia 1.12. The
+   archived environment was generated with Julia 1.12.4.
 2. Run the installer. On Windows, check **"Add Julia to PATH"** when prompted.
 3. Open a terminal (Command Prompt, PowerShell, or Bash) and verify:
    ```
    julia --version
    ```
-   You should see something like `julia version 1.11.x`. Any version from 1.10 onward will work.
+   You should see `julia version 1.12.x`.
 
 ## Step 1: Download and install dependencies
 
@@ -44,9 +48,51 @@ Then install all required Julia packages:
 julia --project=. -e "using Pkg; Pkg.instantiate()"
 ```
 
-This reads `Project.toml` and downloads everything Julia needs (CSV, DataFrames, Plots, etc.). It may take a few minutes the first time. You only need to do this once.
+This reads `Project.toml` and the archived `Manifest.toml` and downloads the
+dependency versions used by this repository. It may take a few minutes the
+first time. You only need to do this once.
 
 **All commands below assume your terminal is inside this folder.**
+
+## Archived accepted data
+
+The complete run-level data behind the accepted paper are versioned in the
+repository:
+
+| Accepted output | Archived input | Rows |
+|---|---|---:|
+| Tables 4--6 and the benchmark-data figures | `results/benchmark/raw.csv` | 5,400 |
+| Table 7 | `results/sensitivity/raw.csv` | 5,400 |
+| Table 8 | `results/ablation/raw.csv` | 1,620 |
+| Table 9 | `results/signal_restore/cs_sweep.csv` | 1,200 |
+| Table 11 | `results/logreg/logreg_results.csv` | 300 |
+
+The commands below regenerate tables and figures from these accepted data
+without rerunning the experiments. Full experiment commands are also provided
+for readers who want an independent rerun. A full rerun without `--resume`
+replaces the corresponding CSV, so preserve the archived file if you need an
+exact copy of the accepted data.
+
+## Published algorithms and ablation switches
+
+The no-argument constructors instantiate the algorithms published in the
+paper:
+
+- `SOPPMethod()` uses `tsel=:cond` and `srule=:max`.
+- `SDLPMethod()` uses `srule=:max`.
+
+Algorithms 1 and 2 in the paper describe only these defaults. The alternative
+settings exist solely to reproduce the parameter-rule ablation in Table 8:
+
+- SOPP: `tsel=:gap` replaces the condition-number Perry parameter by the
+  eigenvalue-gap choice; `srule=:bb1`, `:bb2`, and `:abb` select the first
+  ratio, second ratio, and alternating rule.
+- SDLP: `srule=:r1`, `:r2`, and `:alt` select the first ratio, second ratio,
+  and alternating rule.
+
+The SDLP constructor and sensitivity CSV retain the code field name `eta` for
+the initial line-search step. This is the parameter denoted by β in the
+accepted paper; it is unrelated to `tsel` or `srule`.
 
 ## Step 2: Smoke test (verify the setup)
 
@@ -57,6 +103,16 @@ julia --project=. scripts/s10_smoke_test.jl
 This runs all 5 methods on all 18 test problems at a small size (n = 100) to confirm everything is working. It takes about a minute. Check the log in `results/logs/` for any errors.
 
 If this step passes with no errors, your setup is correct.
+
+### Full automated test suite
+
+Run all three test files before modifying or redistributing the code:
+
+```bash
+julia --project=. test/test_rebuilt_methods.jl
+julia --project=. test/test_sensitivity.jl
+julia --project=. test/test_ablation.jl
+```
 
 ## Step 3: Full benchmark (5,400 runs)
 
@@ -127,34 +183,108 @@ julia --project=. scripts/s55_logreg.jl --quick
 
 Supports `--resume`, `--datasets=a1a.t,colon-cancer`, `--methods=SDLP,SOPP`, and `--summary`.
 
-## Step 7: Generate tables
+## Step 7: Parameter sensitivity (5,400 runs)
+
+The one-at-a-time sensitivity study uses 30 configurations of SOPP and SDLP on
+all 18 problems and 10 initial points at `n = 10,000`.
+
+```bash
+julia --threads=1 --project=. scripts/s60_sensitivity.jl
+```
+
+**Output:** `results/sensitivity/raw.csv`
+
+Use `--resume` to continue an interrupted run. To validate the archived CSV
+and print the per-family rate and median-function-evaluation bands used in
+Table 7 without running any solver, use:
+
+```bash
+julia --threads=1 --project=. scripts/s60_sensitivity.jl --summary
+```
+
+In that summary, the SDLP family labelled `eta` is the β row of Table 7,
+as explained above.
+
+## Step 8: Parameter-choice ablation (1,620 runs)
+
+The parameter-choice ablation compares the condition-number and eigenvalue-gap
+Perry parameters for SOPP, as well as four spectral rules for SOPP and SDLP.
+It runs nine configurations on all 18 problems and 10 initial points at
+`n = 10,000`.
+
+```bash
+julia --threads=1 --project=. scripts/s65_ablation.jl
+```
+
+**Output:** `results/ablation/raw.csv`
+
+The script writes a timestamped log under `results/logs/`. If a run is
+interrupted, resume it without repeating completed instances:
+
+```bash
+julia --threads=1 --project=. scripts/s65_ablation.jl --resume
+```
+
+To validate the completed CSV and print per-configuration summaries, identity
+checks, and failure-status counts without running solvers:
+
+```bash
+julia --threads=1 --project=. scripts/s65_ablation.jl --summary
+```
+
+The method constructors expose the same choices for focused experiments:
+
+- `SOPPMethod(tsel=:cond, srule=:max)` uses the published defaults. Other
+  choices are `tsel=:gap` and `srule=:bb1`, `:bb2`, or `:abb`.
+- `SDLPMethod(srule=:max)` uses the published default. Other choices are
+  `srule=:r1`, `:r2`, or `:alt`.
+
+For `:abb` and `:alt`, the outer iteration index `k` is passed when the next
+search direction is formed. Even `k` selects the first ratio and odd `k`
+selects the second.
+
+## Step 9: Generate the accepted-paper tables
 
 ```bash
 julia --project=. scripts/s75_tables.jl
 ```
 
-Produces LaTeX tables in `results/tables/`:
+This reads the archived benchmark, compressed-sensing, and logistic-regression
+CSVs and writes LaTeX tables under `results/tables/`. The accepted-paper
+mapping is:
 
-| File | Contents |
-|------|----------|
-| `table_A.tex` | Aggregate performance summary |
-| `table_C.tex` | Pairwise wins/ties/losses |
-| `table_D.tex` | Per-dimension breakdown |
-| `table_E.tex` | Compressed sensing summary |
-| `tables.tex` | Standalone document with detailed per-problem results |
+| Paper table | Generated file | Archived input |
+|---|---|---|
+| Table 4, aggregate performance | `results/tables/table_A.tex` | `results/benchmark/raw.csv` |
+| Table 5, per-problem convergence | `results/tables/table_P.tex` | `results/benchmark/raw.csv` |
+| Table 6, pairwise wins/ties/losses | `results/tables/table_C.tex` | `results/benchmark/raw.csv` |
+| Table 9, compressed sensing | `results/tables/table_E.tex` | `results/signal_restore/cs_sweep.csv` |
+| Table 11, logistic regression | `results/tables/table_F.tex` | `results/logreg/logreg_results.csv` |
 
-## Step 8: Generate figures
+The script also creates `table_D.tex` (per-dimension performance) and
+`tables.tex` (detailed benchmark results). Tables 7 and 8 are printed by the
+`--summary` commands in Steps 7 and 8; they are not emitted by
+`s75_tables.jl`.
+
+## Step 10: Generate the accepted-paper figures
 
 ```bash
 julia --project=. scripts/s70_figures.jl
 ```
 
-Produces PDF figures in `results/figures/`:
+For only the figures used in the paper, the exact commands and outputs are:
 
-- **Performance profiles:** iterations, function evaluations, CPU time
-- **Convergence trajectories:** representative problems (P5/n=50000, P8/n=10000)
-- **Dimension scaling:** CPU time vs problem size
-- **Compressed sensing:** reconstructed signals, residual convergence, MSE vs sparsity, MSE vs measurement ratio, iterations vs noise, phase transition heatmap
+| Command | Accepted-paper outputs |
+|---|---|
+| `julia --project=. scripts/s70_figures.jl --profiles` | `perf_iterations.pdf`, `perf_fevals.pdf`, `perf_time.pdf` |
+| `julia --project=. scripts/s70_figures.jl --scaling` | `scaling_cpu_time.pdf` |
+| `julia --project=. scripts/s70_figures.jl --convergence` | `convergence_P9_n50000.pdf` |
+| `julia --project=. scripts/s70_figures.jl --signal` | `reconstructed_signals.pdf`, `cs_residual_convergence.pdf` |
+
+All files are written to `results/figures/`. The performance profiles and
+scaling plot read `results/benchmark/raw.csv`. The convergence command solves
+the fixed Problem 9 instance at `n = 50,000`, and the signal command solves the
+fixed seeded compressed-sensing instance described in the paper.
 
 To generate only a subset:
 
@@ -165,6 +295,9 @@ julia --project=. scripts/s70_figures.jl --scaling        # scaling plot only
 julia --project=. scripts/s70_figures.jl --signal         # CS figures only
 ```
 
+Running `s70_figures.jl` with no flag also creates four exploratory
+compressed-sensing sweep plots that are not used in the accepted paper.
+
 ---
 
 ## Directory structure
@@ -172,6 +305,7 @@ julia --project=. scripts/s70_figures.jl --signal         # CS figures only
 ```
 SpectralCGPM.jl/
 ├── Project.toml              # Dependencies
+├── Manifest.toml             # Archived dependency versions
 ├── README.md                 # This file
 ├── data/
 │   └── libsvm/               # 12 LIBSVM datasets (.csv)
@@ -192,15 +326,20 @@ SpectralCGPM.jl/
 │   ├── s45_benchmark.jl      # Step 3: full benchmark
 │   ├── s50_signal_restore.jl # Step 4: compressed sensing
 │   ├── s55_logreg.jl         # Step 6: logistic regression
-│   ├── s70_figures.jl        # Step 8: generate figures
-│   └── s75_tables.jl         # Step 7: generate tables
-└── results/                  # Created automatically by the scripts
-    ├── benchmark/            # raw.csv + backups
+│   ├── s60_sensitivity.jl    # Step 7: one-at-a-time sensitivity
+│   ├── s65_ablation.jl       # Step 8: parameter-choice ablation
+│   ├── s70_figures.jl        # Step 10: generate figures
+│   └── s75_tables.jl         # Step 9: generate tables
+├── test/                     # Full automated test suite
+└── results/                  # Accepted CSVs plus generated outputs
+    ├── benchmark/            # accepted raw.csv
+    ├── sensitivity/          # accepted sensitivity raw.csv
+    ├── ablation/             # accepted ablation raw.csv
     ├── signal_restore/       # cs_sweep.csv
     ├── logreg/               # logreg_results.csv
-    ├── figures/              # Generated PDFs
-    ├── tables/               # Generated LaTeX
-    └── logs/                 # Timestamped logs
+    ├── figures/              # generated PDFs (ignored by Git)
+    ├── tables/               # generated LaTeX (ignored by Git)
+    └── logs/                 # timestamped logs (ignored by Git)
 ```
 
 ## Experiment setup
@@ -209,8 +348,10 @@ SpectralCGPM.jl/
 - **Benchmark:** 18 problems, 6 dimensions (1K--120K), 10 initial points = 5,400 runs
 - **Compressed sensing:** 4 sparsity ratios, 3 measurement ratios, 4 noise levels, 5 trials = 1,200 runs
 - **Logistic regression:** 12 LIBSVM datasets, 5 trials = 300 runs
-- **Convergence tolerance:** 10^{-11} (benchmark), 10^{-5} (CS and logreg)
-- **Maximum iterations:** 2,000 (benchmark), 5,000 (CS and logreg)
+- **Sensitivity:** 30 configurations, 18 problems, 10 initial points = 5,400 runs
+- **Parameter-choice ablation:** 9 configurations, 18 problems, 10 initial points = 1,620 runs
+- **Convergence tolerance:** 10^{-11} (benchmark, sensitivity, ablation, and logistic regression), 10^{-5} (compressed sensing)
+- **Maximum iterations:** 2,000 (benchmark, sensitivity, and ablation), 5,000 (compressed sensing and logistic regression)
 - **Constraint set:** R^n_+ for all problems except Problem 18 which uses [1, infinity)^n
 
 Competitor methods use their originally published parameters. Our methods use the parameters reported in the paper. See `src/types.jl` for exact values.
@@ -218,6 +359,6 @@ Competitor methods use their originally published parameters. Our methods use th
 ## Troubleshooting
 
 - **"Package X not found"**: Re-run `julia --project=. -e "using Pkg; Pkg.instantiate()"` from inside the project folder.
-- **Run interrupted**: Use `--resume` to continue from where it stopped (supported by Steps 3, 4, and 6).
+- **Run interrupted**: Use `--resume` to continue from where it stopped (supported by the benchmark, compressed sensing, logistic regression, sensitivity, and ablation scripts).
 - **Plots fail to save**: Make sure the `results/figures/` directory exists. Create it manually if needed.
 - **Out of memory on large dimensions**: Close other programs. The largest runs (n = 120,000) need several GB of RAM.

@@ -69,8 +69,35 @@ function _restart_direction(Gnext, lambda_current, alpha_min, alpha_max)
     return -Gnext, 1.0
 end
 
+function _sopp_spectral_candidate(m::SOPPMethod, k::Integer, s2, sq, q2)
+    bb1 = s2 / sq
+    bb2 = sq / q2
+    m.srule === :max && return max(bb1, bb2)
+    m.srule === :bb1 && return bb1
+    m.srule === :bb2 && return bb2
+    m.srule === :abb && return iseven(k) ? bb1 : bb2
+    throw(ArgumentError("Unsupported SOPP spectral rule: $(m.srule)"))
+end
+
+function _sopp_t_parameter(m::SOPPMethod, lambda, s2, sq, q2)
+    m.tsel === :cond && return lambda / 2 * (sq / s2 + q2 / sq)
+    m.tsel === :gap && return lambda * (sq / s2)
+    throw(ArgumentError("Unsupported SOPP Perry parameter rule: $(m.tsel)"))
+end
+
+function _sdlp_spectral_candidate(m::SDLPMethod, k::Integer, p2, pw, w2)
+    r1 = w2 / pw
+    r2 = pw / p2
+    m.srule === :max && return max(r1, r2)
+    m.srule === :r1 && return r1
+    m.srule === :r2 && return r2
+    m.srule === :alt && return iseven(k) ? r1 : r2
+    throw(ArgumentError("Unsupported SDLP spectral rule: $(m.srule)"))
+end
+
 function _sopp_next_direction(m::SOPPMethod, Gx, Gz, Gnext, s, p,
-                              lambda_current)
+                              lambda_current, k::Integer=0;
+                              on_spectral::Union{Nothing,Function}=nothing)
     q = Gz .- Gx .+ m.tau .* s
     s2 = dot(s, s)
     sq = dot(s, q)
@@ -83,8 +110,11 @@ function _sopp_next_direction(m::SOPPMethod, Gx, Gz, Gnext, s, p,
         return (direction=direction, lambda=lambda, restarted=true)
     end
 
-    lambda = spectral_proj(max(s2 / sq, sq / q2), m.alpha_min, m.alpha_max)
-    tstar = lambda / 2 * (sq / s2 + q2 / sq)
+    on_spectral === nothing || on_spectral(k, s2 / sq, sq / q2)
+    lambda = spectral_proj(
+        _sopp_spectral_candidate(m, k, s2, sq, q2),
+        m.alpha_min, m.alpha_max)
+    tstar = _sopp_t_parameter(m, lambda, s2, sq, q2)
     theta = dot(q .- tstar .* s, Gnext) / pq
     G2 = dot(Gnext, Gnext)
     if !all(isfinite, (lambda, tstar, theta, G2)) || !(G2 > 0)
@@ -110,7 +140,9 @@ function _sopp_next_direction(m::SOPPMethod, Gx, Gz, Gnext, s, p,
     return (direction=direction, lambda=Float64(lambda), restarted=false)
 end
 
-function _sdlp_next_direction(m::SDLPMethod, Gx, Gnext, p, lambda_current)
+function _sdlp_next_direction(m::SDLPMethod, Gx, Gnext, p, lambda_current,
+                              k::Integer=0;
+                              on_spectral::Union{Nothing,Function}=nothing)
     y = Gnext .- Gx
     p2 = dot(p, p)
     if !all(isfinite, y) || !isfinite(p2) || !(p2 > 0)
@@ -130,7 +162,10 @@ function _sdlp_next_direction(m::SDLPMethod, Gx, Gnext, p, lambda_current)
         return (direction=direction, lambda=lambda, restarted=true)
     end
 
-    lambda = spectral_proj(max(w2 / pw, pw / p2), m.alpha_min, m.alpha_max)
+    on_spectral === nothing || on_spectral(k, w2 / pw, pw / p2)
+    lambda = spectral_proj(
+        _sdlp_spectral_candidate(m, k, p2, pw, w2),
+        m.alpha_min, m.alpha_max)
     Gp = dot(Gnext, p)
     a = Gp / pw
     theta = dot(Gnext, w) / pw - lambda * (w2 / pw) * (Gp / pw)
@@ -168,7 +203,8 @@ end
 function solve(m::SOPPMethod, prob::TestProblem, x0::Vector{Float64};
                eps=1e-11, maxiter=2000, cb::ProgressCallback=ProgressCallback(),
                stall_limit::Int=typemax(Int),
-               on_iter::Union{Nothing,Function}=nothing)
+               on_iter::Union{Nothing,Function}=nothing,
+               on_spectral::Union{Nothing,Function}=nothing)
     t0_ns = time_ns()
     fe = Ref(0)
     G(x) = (fe[] += 1; prob.G(x))
@@ -219,7 +255,8 @@ function solve(m::SOPPMethod, prob::TestProblem, x0::Vector{Float64};
         end
 
         s = z .- x
-        update = _sopp_next_direction(m, Gx, Gz, Gx_new, s, p, phi)
+        update = _sopp_next_direction(
+            m, Gx, Gz, Gx_new, s, p, phi, k; on_spectral=on_spectral)
         p = update.direction
         phi = update.lambda
         restarts += update.restarted
@@ -239,7 +276,8 @@ end
 
 function solve(m::SDLPMethod, prob::TestProblem, x0::Vector{Float64};
                eps=1e-11, maxiter=2000, cb::ProgressCallback=ProgressCallback(),
-               on_iter::Union{Nothing,Function}=nothing, kwargs...)
+               on_iter::Union{Nothing,Function}=nothing,
+               on_spectral::Union{Nothing,Function}=nothing, kwargs...)
     t0_ns = time_ns()
     fe = Ref(0)
     G(x) = (fe[] += 1; prob.G(x))
@@ -283,7 +321,8 @@ function solve(m::SDLPMethod, prob::TestProblem, x0::Vector{Float64};
 
         gamma_val = _update_gamma(m, gamma_val, normGx_new < normGx)
 
-        update = _sdlp_next_direction(m, Gx, Gx_new, d, phi)
+        update = _sdlp_next_direction(
+            m, Gx, Gx_new, d, phi, k; on_spectral=on_spectral)
         d = update.direction
         phi = update.lambda
         restarts += update.restarted

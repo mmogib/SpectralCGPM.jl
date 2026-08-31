@@ -278,7 +278,7 @@ end
     end
 end
 
-@testset "Exchange 14 script contracts" begin
+@testset "Metrics script contracts" begin
     scripts_dir = joinpath(@__DIR__, "..", "scripts")
     s45 = read(joinpath(scripts_dir, "s45_benchmark.jl"), String)
     s50 = read(joinpath(scripts_dir, "s50_signal_restore.jl"), String)
@@ -308,7 +308,7 @@ end
     @test !occursin("t0 = time()", solver_source)
 end
 
-@testset "Exchange 15 relative-noise naming contracts" begin
+@testset "Compressed-sensing relative-noise naming contracts" begin
     scripts_dir = joinpath(@__DIR__, "..", "scripts")
     s50 = read(joinpath(scripts_dir, "s50_signal_restore.jl"), String)
     s70 = read(joinpath(scripts_dir, "s70_figures.jl"), String)
@@ -329,7 +329,7 @@ end
     @test !occursin("noise_sigma", s70)
 end
 
-@testset "Exchange 17 figure and table contracts" begin
+@testset "Figure and table generation contracts" begin
     scripts_dir = joinpath(@__DIR__, "..", "scripts")
     s70 = read(joinpath(scripts_dir, "s70_figures.jl"), String)
     s75 = read(joinpath(scripts_dir, "s75_tables.jl"), String)
@@ -374,7 +374,7 @@ end
     @test occursin("\\\\label{tab:logreg}", s75)
 end
 
-@testset "Exchange 18 paper Problem 9 convergence contract" begin
+@testset "Accepted-paper Problem 9 convergence contract" begin
     s70 = read(joinpath(@__DIR__, "..", "scripts", "s70_figures.jl"), String)
 
     @test PROBLEM_IDS[9] == 11

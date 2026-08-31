@@ -27,18 +27,32 @@ struct SOPPMethod <: AbstractMethod
     c::Float64         # orthogonal-component clipping bound, c > alpha_max
     zeta1::Float64     # line search norm projection lower bound
     zeta2::Float64     # line search norm projection upper bound
+    tsel::Symbol       # Perry parameter: :cond or :gap
+    srule::Symbol      # spectral rule: :max, :bb1, :bb2, or :abb
 end
 
 function SOPPMethod(; tau=1.0, rho=0.8, beta=0.5, zeta=1e-4,
         alpha_min=0.1, alpha_max=2.0, lambda0=1.0, gamma=1.1,
-        c=alpha_max + 1.0, zeta1=1.0, zeta2=1.0)
+        c=alpha_max + 1.0, zeta1=1.0, zeta2=1.0,
+        tsel=:cond, srule=:max)
     @assert tau > 0 "SOPP requires tau > 0"
     @assert 0 < alpha_min <= 1 <= alpha_max "SOPP requires 0 < alpha_min <= 1 <= alpha_max"
     @assert alpha_min <= lambda0 <= alpha_max "SOPP requires lambda0 in [alpha_min, alpha_max]"
     @assert c > alpha_max "SOPP requires c > alpha_max"
     @assert 1.0 <= gamma <= 1.8 "SOPP adaptive gamma must start in [1.0, 1.8]"
-    SOPPMethod(tau, rho, beta, zeta, alpha_min, alpha_max, lambda0, gamma, c, zeta1, zeta2)
+    tsel in (:cond, :gap) || throw(ArgumentError(
+        "SOPP tsel must be :cond or :gap; received $tsel"))
+    srule in (:max, :bb1, :bb2, :abb) || throw(ArgumentError(
+        "SOPP srule must be :max, :bb1, :bb2, or :abb; received $srule"))
+    SOPPMethod(tau, rho, beta, zeta, alpha_min, alpha_max, lambda0,
+               gamma, c, zeta1, zeta2, tsel, srule)
 end
+
+# Preserve the pre-ablation positional constructor used by existing scripts.
+SOPPMethod(tau, rho, beta, zeta, alpha_min, alpha_max, lambda0, gamma,
+           c, zeta1, zeta2) =
+    SOPPMethod(tau, rho, beta, zeta, alpha_min, alpha_max, lambda0,
+               gamma, c, zeta1, zeta2, :cond, :max)
 
 # --- Our method 2: SDLP ---
 struct SDLPMethod <: AbstractMethod
@@ -52,18 +66,28 @@ struct SDLPMethod <: AbstractMethod
     gamma::Float64
     zeta1::Float64
     zeta2::Float64
+    srule::Symbol       # spectral rule: :max, :r1, :r2, or :alt
 end
 
 function SDLPMethod(; tau=0.001, rho=0.5, eta=0.6, zeta=0.1,
         alpha_min=0.55, alpha_max=4.9, lambda0=1.0, gamma=1.8,
-        zeta1=1.0, zeta2=1.0)
+        zeta1=1.0, zeta2=1.0, srule=:max)
     @assert 0 <= tau <= 1 "SDLP requires tau in [0, 1]"
     @assert alpha_min > (1 + tau) / 2 "SDLP requires alpha_min > (1 + tau) / 2"
     @assert alpha_max >= alpha_min "SDLP requires alpha_max >= alpha_min"
     @assert alpha_min <= lambda0 <= alpha_max "SDLP requires lambda0 in [alpha_min, alpha_max]"
     @assert 1.0 <= gamma <= 1.95 "SDLP adaptive gamma must start in [1.0, 1.95]"
-    SDLPMethod(tau, rho, eta, zeta, alpha_min, alpha_max, lambda0, gamma, zeta1, zeta2)
+    srule in (:max, :r1, :r2, :alt) || throw(ArgumentError(
+        "SDLP srule must be :max, :r1, :r2, or :alt; received $srule"))
+    SDLPMethod(tau, rho, eta, zeta, alpha_min, alpha_max, lambda0,
+               gamma, zeta1, zeta2, srule)
 end
+
+# Preserve the pre-ablation positional constructor used by existing scripts.
+SDLPMethod(tau, rho, eta, zeta, alpha_min, alpha_max, lambda0, gamma,
+           zeta1, zeta2) =
+    SDLPMethod(tau, rho, eta, zeta, alpha_min, alpha_max, lambda0,
+               gamma, zeta1, zeta2, :max)
 
 # --- Competitor: MOPCGM (Sabi'u et al. 2023, Algorithm 2.1) ---
 # Parameters from Section 4.1: rho=0.1, eta=0.9, zeta=0.0001, lambda=0.1
